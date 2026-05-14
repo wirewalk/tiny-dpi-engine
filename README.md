@@ -1,92 +1,232 @@
 # tiny-dpi-engine
 
-A lightweight Deep Packet Inspection engine written in C11. Captures network traffic, parses packets, classifies protocols using signature matching (Aho-Corasick algorithm) and port-based heuristics, and tracks connection flows in real time.
+Лёгкий движок глубокого инспектирования пакетов (Deep Packet Inspection) на C11.
 
-## Architecture
+Захватывает сетевой трафик, разбирает пакеты, классифицирует протоколы с помощью сигнатур (алгоритм Ахо-Корасик) и портовых эвристик, отслеживает сетевые потоки в реальном времени.
 
-```
-Capture (libpcap) → Parse (Ethernet/IP/TCP/UDP) → Match (Aho-Corasick) → Classify → Flow Table
-```
-
-**Components:**
-
-| Component | File | Description |
-|-----------|------|-------------|
-| Packet parser | `src/packet.c` | Ethernet (including 802.1Q VLAN), IPv4, TCP, UDP header parsing |
-| Signature DB | `src/signatures.c` | Loads protocol signatures from text files (`PROTO: pattern`) |
-| Aho-Corasick | `src/aho_corasick.c` | O(n) multi-pattern matching with failure links |
-| Classifier | `src/classify.c` | 3-stage: payload inspection → signature match → port fallback |
-| Flow tracker | `src/flow.c` | Hash table with 5-tuple canonicalization, bidirectional aggregation |
-| Capture | `src/capture.c` | libpcap live capture and offline pcap file reading |
-| Statistics | `src/stats.c` | Per-protocol counters, classification ratio |
-
-## Build
-
-```bash
-make                    # build (auto-detects libpcap)
-sudo apt install libpcap-dev   # Debian/Ubuntu — needed for live capture
-make test               # build + run unit tests
-```
-
-Without libpcap, the engine builds with stubs — packet parsing, classification, and flow tracking work, but live capture is disabled.
-
-## Usage
-
-```bash
-# Live capture from interface (requires root/libpcap)
-sudo ./tiny-dpi-engine -i eth0 -n 1000
-
-# Read from pcap file
-./tiny-dpi-engine -r capture.pcap
-
-# With custom signatures and BPF filter
-./tiny-dpi-engine -i any -f "port 53 or port 80" -s my_sigs.sig -n 5000
-
-# Options
--i, --iface IFACE    Network interface (default: auto-detect)
--r, --read FILE      Read from pcap file instead of live capture
--s, --sigs FILE      Signature database (default: signatures/default.sig)
--f, --filter FILTER  BPF filter expression
--n, --count N        Capture N packets then stop (0 = unlimited)
--t, --timeout SEC    Capture timeout
--v, --verbose        Verbose output
--h, --help           Show help
-```
-
-## Signature Format
+## Архитектура
 
 ```
-# Comment lines start with #
-PROTOCOL: pattern_string
+┌─────────────┐    ┌───────────┐    ┌────────────────┐    ┌──────────────┐
+│   Захват    │───>│  Разбор   │───>│  Классификация │───>│    Таблица   │
+│  (libpcap)  │    │  пакетов  │    │  протоколов    │    │   потоков   │
+└─────────────┘    └───────────┘    └────────────────┘    └──────────────┘
+                         │                   │                     │
+                         v                   v                     v
+                    Ethernet/IPv4     Ахо-Корасик +         Хэш-таблица
+                    TCP/UDP/ICMP      эвристики payload     5-кортежей
+                                     + фолбэк на порты
+```
 
+### Компоненты
+
+| Компонент | Файл | Назначение |
+|-----------|------|-----------|
+| Парсер пакетов | `src/packet.c` | Разбор Ethernet (включая 802.1Q VLAN), IPv4, TCP, UDP, ICMP |
+| База сигнатур | `src/signatures.c` | Загрузка сигнатур из текстового файла |
+| Ахо-Корасик | `src/aho_corasick.c` | Множественный поиск подстрок за O(n) |
+| Классификатор | `src/classify.c` | 3-стадийная классификация: payload → сигнатуры → порты |
+| Таблица потоков | `src/flow.c` | Хэш-таблица с канонизацией 5-кортежа |
+| Захват трафика | `src/capture.c` | Живой захват (libpcap) и чтение pcap-файлов |
+| Статистика | `src/stats.c` | Агрегированные метрики по протоколам |
+
+## Ключевые алгоритмы
+
+### Ахо-Корасик
+
+Алгоритм множественного поиска подстрок. Построение автомата состоит из двух фаз:
+
+1. **Trie-дерево**: все сигнатуры вставляются в префиксное дерево. Каждый узел — массив из 256 переходов (полный байтовый алфавит). Лист содержит `sig_id` — идентификатор совпавшей сигнатуры.
+
+2. **Failure-ссылки** (BFS): для каждого узла вычисляется самая длинная суффиксная цепочка, которая также является путём от корня. При несовпадении текущего байта — переход по failure-ссылке вместо возврата к началу.
+
+```
+Сигнатуры: "GET ", "SSH-", "POST"
+
+        root
+       / |  \
+      G  S   P
+      |  |   |
+      E  S   O
+      |  |   |
+      T  H   S
+      |  |   |
+     ' ' -   T
+
+Для узла 'H' (SSH): fail → root (нет другого суффикса)
+Для узла 'E' (GET): fail → root
+```
+
+Поиск: один проход по payload, O(n) по длине данных. Не зависит от количества сигнатур.
+
+Реализация использует **пул аллокаций** — все узлы в одном непрерывном массиве. Это улучшает локальность кэша при обходе дерева и упрощает освобождение памяти (один `free`).
+
+### Хэш-таблица потоков
+
+Ключ — **канонический 5-кортеж** (src_ip, dst_ip, src_port, dst_port, ip_proto).
+
+Канонизация: IP-адреса упорядочиваются по числовому значению (меньший → src). Это гарантирует, что пакеты A→B и B→A попадают в один поток. При равенстве IP — упорядочиваются порты.
+
+```
+Пакет A→B: (10.0.0.2:54321 → 10.0.0.1:80, TCP)
+Канонический ключ: (10.0.0.1:80, 10.0.0.2:54321, TCP)
+
+Пакет B→A: (10.0.0.1:80 → 10.0.0.2:54321, TCP)
+Канонический ключ: (10.0.0.1:80, 10.0.0.2:54321, TCP)  ← тот же!
+```
+
+Хэш-функция: XOR полей + мультипликативное перемешивание (Murmur-like finalizer). Размер таблицы — простое число (65537) для равномерного распределения. Разрешение коллизий — цепочечное (chaining).
+
+### Классификация протоколов
+
+Трёхстадийная стратегия, привязанная к потоку:
+
+```
+Пакет → Поиск/создание потока
+         │
+         ├─ Поток уже классифицирован? → Наследуем результат, пропускаем анализ
+         │
+         ├─ Стадия 1: Инспекция payload
+         │   ├─ HTTP: "GET ", "POST ", "HTTP/1.x"
+         │   ├─ SSH:  "SSH-2.0", "SSH-1.99"
+         │   ├─ SIP:  "INVITE ", "BYE ", "REGISTER ", "SIP/2.0"
+         │   ├─ TLS:  ContentType=0x16, Version=0x03xx
+         │   ├─ QUIC: "Q04x" (версия)
+         │   └─ RTP:  version=2, payload_type 0..34 (аудио/видео)
+         │            или 200..207 (RTCP: SR, RR, SDES, BYE)
+         │
+         ├─ Стадия 2: Ахо-Корасик (пользовательские сигнатуры)
+         │
+         └─ Стадия 3: Фолбэк на well-known порты
+             ├─ 80=HTTP, 443=HTTPS, 53=DNS, 22=SSH
+             ├─ 21=FTP, 25=SMTP, 5060=SIP, 123=NTP
+             └─ 67/68=DHCP
+```
+
+**Stateful-подход**: если первый пакет потока классифицирован, все последующие наследуют результат. Это исключает повторный анализ и повышает производительность.
+
+## Формат сигнатур
+
+Текстовый файл, одна сигнатура на строку:
+
+```
+# Комментарии начинаются с #
+ПРОТОКОЛ: шаблон_поиска
+
+# Примеры:
 HTTP: GET 
 HTTP: POST 
 SSH: SSH-2.0
 TLS: \x16\x03\x01
 SIP: INVITE 
-RTP: (detected by header structure)
+SIP: BYE 
+QUIC: Q050
 ```
 
-Supported protocols: HTTP, HTTPS, DNS, SSH, FTP, SMTP, RTP, SIP, RTCP, QUIC, DHCP, NTP, ICMP, TLS.
+**Правила:**
+- `ПРОТОКОЛ` — один из поддерживаемых: HTTP, HTTPS, DNS, SSH, FTP, SMTP, RTP, SIP, RTCP, QUIC, DHCP, TLS
+- `шаблон_поиска` — последовательность байтов (текст или `\xHH`)
+- Пробел после двоеточия необязателен
+- Строки с неизвестным протоколом — пропускаются
 
-## Classification Strategy
+## Сборка и запуск
 
-1. **Stateful flow tracking** — each connection is tracked by 5-tuple (src_ip, dst_ip, src_port, dst_port, protocol). Once classified, all subsequent packets inherit the classification.
+```bash
+make                    # сборка (автоопределение libpcap)
+make test               # сборка + запуск unit-тестов
+make clean              # очистка
 
-2. **Payload inspection** — checks packet payload for known patterns:
-   - Plaintext protocols: HTTP methods, SSH banner, SIP commands, FTP responses
-   - Binary protocols: TLS record layer (0x16 0x03 xx), RTP header (version 2, valid PT)
-   - Aho-Corasick signature match against loaded database
+# Для live-capture нужна libpcap:
+# Debian/Ubuntu: sudo apt install libpcap-dev
+# Fedora:        sudo dnf install libpcap-devel
+# Alt Linux:     sudo apt-get install libpcap-devel
+```
 
-3. **Port fallback** — if payload inspection fails, classifies by well-known port numbers (80=HTTP, 443=HTTPS, 53=DNS, 22=SSH, etc.)
+Без libpcap проект собирается с заглушками — парсинг, классификация и flow tracking работают, захват отключён.
 
-## Performance Notes
+### Примеры использования
 
-- Aho-Corasick provides O(n) matching regardless of number of signatures
-- Flow table uses open-addressing hash table (65537 buckets, ~1M flow limit)
-- Zero-copy packet parsing — all operations on raw buffer pointers, no memcpy
-- Canonical 5-tuple ensures bidirectional flows share one entry
+```bash
+# Живой захват с интерфейса (требует root)
+sudo ./tiny-dpi-engine -i eth0 -n 1000
 
-## License
+# Читать из pcap-файла
+./tiny-dpi-engine -r capture.pcap
+
+# С фильтром BPF и своей базой сигнатур
+./tiny-dpi-engine -i any -f "port 53 or port 80" -s my_sigs.sig -n 5000
+
+# Все опции
+./tiny-dpi-engine -h
+```
+
+### Ожидаемый вывод
+
+```
+tiny-dpi-engine
+Loading signatures from: signatures/default.sig
+Loaded 26 signatures
+Aho-Corasick: 187 nodes
+Capturing on eth0 (max 1000 packets, Ctrl+C to stop)...
+
+=== DPI Statistics ===
+Total packets:   1000
+Total bytes:     523847
+Classified:      947
+Unclassified:    53
+Active flows:    42
+Classification:  94.7%
+
+Per-protocol breakdown:
+  DNS          312
+  TLS          287
+  HTTP         198
+  HTTPS        84
+  SSH          31
+  QUIC         22
+  RTP          13
+
+SRC IP              PORT   -> DST IP              PORT    PROTO       PACKETS      BYTES  SIG
+192.168.1.100      54321  -> 93.184.216.34        80     HTTP              15       8472
+192.168.1.100      54322  -> 140.82.121.4         443    HTTPS             22      14891
+```
+
+## Как добавить свой протокол
+
+1. **Определить enum** в `include/dpi.h` — добавить значение в `dpi_protocol_t`
+2. **Имя протокола** — добавить запись в массив `proto_names` в `src/proto.c`
+3. **Порт** — добавить в функцию `classify_by_ports` в `src/classify.c`
+4. **Payload-эвристика** — добавить проверку в `classify_by_payload` в `src/classify.c`
+5. **Сигнатура** — добавить строку в `signatures/default.sig`
+
+Пример: добавляем MQTT (порт 1883, стартовый байт 0x10):
+
+```c
+// dpi.h
+DPI_PROTO_MQTT,
+
+// classify.c — classify_by_ports
+if (dst == 1883 || src == 1883) return DPI_PROTO_MQTT;
+
+// classify.c — classify_by_payload
+if (payload_len >= 2 && (payload[0] & 0xF0) == 0x10) return DPI_PROTO_MQTT;
+
+// signatures/default.sig
+MQTT: \x10
+```
+
+## Ограничения
+
+Текущая реализация сознательно **не включает**:
+
+- **IPv6** — только IPv4 (ethertype 0x0800)
+- **IP-дефрагментацию** — фрагментированные пакеты анализируются отдельно, только первый фрагмент содержит TCP/UDP-заголовки
+- **TCP reassembly** — каждый сегмент обрабатывается независимо, payload из разных сегментов не склеивается
+- **Шифрованный трафик** — TLS/QUIC определяются по заголовку, но содержимое не анализируется
+- **Декодирование протоколов** — сигнатуры ищутся в raw payload, без декодирования Base64, gzip и т.д.
+
+Это осознанный выбор: проект ориентирован на простоту и образовательную ценность, а не на production-полноту. Каждый из этих пунктов — потенциальная тема для отдельной статьи.
+
+## Лицензия
 
 MIT
