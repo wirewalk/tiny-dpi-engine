@@ -9,7 +9,7 @@ HAS_PCAP := $(shell test -f /usr/include/pcap.h && echo yes)
 
 ifeq ($(HAS_PCAP),yes)
 LDFLAGS ?= -lpcap
-SRCS = $(wildcard $(SRC_DIR)/*.c)
+SRCS = $(filter-out $(SRC_DIR)/capture_stub.c,$(wildcard $(SRC_DIR)/*.c))
 else
 $(warning libpcap not found — building without live capture support)
 LDFLAGS ?=

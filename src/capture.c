@@ -12,6 +12,8 @@
  * или по достижении лимита пакетов.
  */
 
+#define _GNU_SOURCE
+#include <sys/types.h>
 #include "dpi.h"
 #include <stdio.h>
 #include <stdlib.h>
