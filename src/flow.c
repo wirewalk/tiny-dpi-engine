@@ -1,9 +1,23 @@
+/*
+ * Таблица сетевых потоков.
+ *
+ * Хэш-таблица с цепочечной (chaining) схемой разрешения коллизий.
+ * Ключ — канонический 5-кортеж (src_ip, dst_ip, src_port, dst_port, ip_proto).
+ *
+ * Канонизация: IP-адреса сортируются по числовому значению,
+ * чтобы пакеты A→B и B→A попадали в один поток.
+ * Это необходимо для корректной классификации двунаправленных сессий.
+ */
+
 #include "dpi.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
 
+/* Хэш-функция для 5-кортежа.
+ * Использует XOR + мультипликативное перемешивание (Murmur-like finalizer).
+ * Размер таблицы — простое число, что улучшает распределение. */
 static uint32_t flow_hash(const dpi_5tuple_t *t) {
     uint32_t h = t->src_ip;
     h ^= t->dst_ip;
@@ -21,6 +35,10 @@ static int tuple_equal(const dpi_5tuple_t *a, const dpi_5tuple_t *b) {
            a->ip_proto == b->ip_proto;
 }
 
+/* Канонизация 5-кортежа.
+ * Упорядочивает IP-адреса (меньший → src), чтобы пакеты обоих
+ * направлений одной сессии имели одинаковый ключ.
+ * При равенстве IP — упорядочивает по портам. */
 static dpi_5tuple_t tuple_canonical(const dpi_5tuple_t *t) {
     dpi_5tuple_t c = *t;
     if (ntohl(t->src_ip) > ntohl(t->dst_ip) ||
@@ -52,6 +70,15 @@ void dpi_flow_table_free(dpi_flow_table_t *ft) {
     ft->count = 0;
 }
 
+/* Поиск потока по 5-кортежу. Если не найден — создаёт новый.
+ *
+ * Алгоритм:
+ *   1. Канонизация кортежа
+ *   2. Вычисление хэша
+ *   3. Линейный поиск по цепочке в бакете
+ *   4. Если не найден — выделение нового узла и вставка в голову цепочки
+ *
+ * Возвращает NULL при превышении лимита (DPI_MAX_FLOWS). */
 dpi_flow_t *dpi_flow_lookup_or_create(dpi_flow_table_t *ft, const dpi_5tuple_t *tuple) {
     dpi_5tuple_t canon = tuple_canonical(tuple);
     uint32_t h = flow_hash(&canon);
@@ -82,6 +109,8 @@ dpi_flow_t *dpi_flow_lookup_or_create(dpi_flow_table_t *ft, const dpi_5tuple_t *
     return &new_node->flow;
 }
 
+/* Вывод таблицы потоков в формате:
+ * SRC_IP PORT -> DST_IP PORT  PROTO  PACKETS  BYTES  SIG */
 void dpi_flow_table_print(const dpi_flow_table_t *ft) {
     char src_ip[INET_ADDRSTRLEN], dst_ip[INET_ADDRSTRLEN];
     char proto_name[64];

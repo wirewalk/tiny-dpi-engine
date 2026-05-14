@@ -1,3 +1,17 @@
+/*
+ * Ахо-Корасик — алгоритм множественного поиска подстрок.
+ *
+ * Построение автомата:
+ *   1. Все сигнатуры вставляются в trie-дерево
+ *   2. BFS от корня вычисляет failure-ссылки (суффиксные переходы)
+ *
+ * Поиск: один проход по входным данным, O(n) по длине входа,
+ * независимо от количества сигнатур.
+ *
+ * Реализация использует пул аллокаций — все узлы в одном массиве.
+ * Это улучшает локальность кэша и упрощает освобождение памяти.
+ */
+
 #include "dpi.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -5,12 +19,16 @@
 
 #define AC_POOL_SIZE 65536
 
+/* Пул узлов trie-дерева. Узлы выделяются последовательно из одного массива,
+ * что обеспечивает хорошее использование кэша при обходе дерева. */
 typedef struct {
     dpi_ac_node_t *nodes;
     int            used;
     int            capacity;
 } ac_pool_t;
 
+/* Выделяет один узел из пула. При исчерпании — удваивает размер.
+ * sig_id инициализируется в -1 (нет совпадения). */
 static dpi_ac_node_t *pool_alloc(ac_pool_t *pool) {
     if (pool->used >= pool->capacity) {
         int new_cap = pool->capacity * 2;
@@ -38,6 +56,10 @@ int dpi_ac_build(dpi_ac_t *ac, const dpi_sig_db_t *db) {
     ac->root->fail = ac->root;
     ac->root->sig_id = -1;
 
+    /* Фаза 1: построение trie-дерева по всем сигнатурам.
+     * Каждый байт сигнатуры — переход по соответствующему потомку.
+     * Если потомка нет — создаётся новый узел.
+     * В листе записывается sig_id. */
     for (int i = 0; i < db->count; i++) {
         dpi_ac_node_t *cur = ac->root;
         const uint8_t *pat = (const uint8_t *)db->sigs[i].pattern;
@@ -54,10 +76,24 @@ int dpi_ac_build(dpi_ac_t *ac, const dpi_sig_db_t *db) {
         cur->sig_id = db->sigs[i].id;
     }
 
+    /* Фаза 2: вычисление failure-ссылок (BFS).
+     *
+     * Failure-ссылка узла — это самый длинный суффикс пути от корня
+     * до этого узла, который является также путём в trie.
+     *
+     * Алгоритм:
+     *   1. Дети корня: fail = root
+     *   2. Для прочих узлов: идём по fail-ссылкам родителей,
+     *      пока не найдём узел с подходящим переходом.
+     *
+     * Дополнительно: отсутствующие переходы корня замыкаются на сам root.
+     * Это устраняет особый случай в функции поиска — cur всегда можно
+     * продвигать через children[] без проверки на NULL. */
     dpi_ac_node_t **queue = malloc((size_t)g_pool.used * sizeof(dpi_ac_node_t *));
     if (!queue) return -1;
     int head = 0, tail = 0;
 
+    /* Дети корня: fail → root, отсутствующие → root */
     for (int c = 0; c < 256; c++) {
         if (ac->root->children[c]) {
             ac->root->children[c]->fail = ac->root;
@@ -67,10 +103,13 @@ int dpi_ac_build(dpi_ac_t *ac, const dpi_sig_db_t *db) {
         }
     }
 
+    /* BFS по уровням trie */
     while (head < tail) {
         dpi_ac_node_t *node = queue[head++];
         for (int c = 0; c < 256; c++) {
             if (node->children[c] && node->children[c] != ac->root) {
+                /* Ищём failure-ссылку: поднимаемся по fail родителя,
+                 * пока не найдём узел с переходом по символу c */
                 dpi_ac_node_t *f = node->fail;
                 while (f != ac->root && !f->children[c]) {
                     f = f->fail;
@@ -99,6 +138,15 @@ void dpi_ac_free(dpi_ac_t *ac) {
     ac->node_count = 0;
 }
 
+/* Поиск совпадений в данных.
+ *
+ * Двигаемся по автомату: для каждого байта данных —
+ *   1. Если текущий узел не имеет перехода по этому байту —
+ *      идём по failure-ссылкам, пока не найдём.
+ *   2. Продвигаемся в найденный узел.
+ *   3. Если узел содержит sig_id >= 0 — сигнатура найдена.
+ *
+ * Возвращает id первой совпавшей сигнатуры или -1. */
 int dpi_ac_search(const dpi_ac_t *ac, const uint8_t *data, size_t len) {
     if (!ac->root || !data || len == 0) return -1;
 

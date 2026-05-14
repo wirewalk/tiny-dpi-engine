@@ -1,3 +1,7 @@
+/*
+ * Маппинг enum протоколов в строковые имена.
+ */
+
 #include "dpi.h"
 #include <stdio.h>
 #include <string.h>

@@ -1,8 +1,25 @@
+/*
+ * Загрузка базы сигнатур из текстового файла.
+ *
+ * Формат файла:
+ *   # строка комментария
+ *   ПРОТОКОЛ: шаблон_поиска
+ *
+ * Пример:
+ *   HTTP: GET
+ *   SSH: SSH-2.0
+ *   TLS: \x16\x03\x01
+ *
+ * Шаблон — последовательность байтов (текст или \xHH эскейпы).
+ * Одна сигнатура на строку. Протокол должен быть из списка в dpi_protocol_t.
+ */
+
 #include "dpi.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+/* Увеличивает массив сигнатур в 2 раза при заполнении */
 static int sig_db_grow(dpi_sig_db_t *db) {
     int new_cap = db->capacity == 0 ? 32 : db->capacity * 2;
     dpi_signature_t *new_sigs = realloc(db->sigs, (size_t)new_cap * sizeof(dpi_signature_t));
@@ -28,13 +45,16 @@ int dpi_sig_db_load(dpi_sig_db_t *db, const char *path) {
     while (fgets(line, sizeof(line), f)) {
         line_no++;
 
+        /* Пропускаем пустые строки и комментарии */
         if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
 
+        /* Убираем завершающий \n / \r */
         char *nl = strchr(line, '\n');
         if (nl) *nl = '\0';
         nl = strchr(line, '\r');
         if (nl) *nl = '\0';
 
+        /* Разделяем строку по первому двоеточию: "ПРОТОКОЛ: шаблон" */
         char *colon = strchr(line, ':');
         if (!colon) continue;
 
@@ -46,6 +66,7 @@ int dpi_sig_db_load(dpi_sig_db_t *db, const char *path) {
 
         if (*pattern == '\0') continue;
 
+        /* Маппинг имени протокола на enum */
         dpi_protocol_t proto = DPI_PROTO_UNKNOWN;
         if (strcmp(proto_str, "HTTP") == 0)     proto = DPI_PROTO_HTTP;
         else if (strcmp(proto_str, "HTTPS") == 0) proto = DPI_PROTO_HTTPS;

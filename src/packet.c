@@ -1,3 +1,18 @@
+/*
+ * Разбор сырых сетевых пакетов.
+ *
+ * Парсит Ethernet-кадр → IPv4 → TCP/UDP/ICMP и извлекает:
+ *   - заголовки всех уровней (указатели на оригинальный буфер, zero-copy)
+ *   - 5-кортеж (src_ip, dst_ip, src_port, dst_port, ip_proto)
+ *   - указатель на payload и его длину
+ *
+ * Поддержка: Ethernet II, 802.1Q VLAN, IPv4, TCP, UDP, ICMP.
+ * Не поддерживается: IPv6, IP defragmentation, TCP reassembly.
+ *
+ * Все проверки границ — строгие: при любом выходе за пределы буфера
+ * пакет отбрасывается (return -1).
+ */
+
 #include "dpi.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,24 +38,30 @@ int dpi_parse_packet(const uint8_t *raw, size_t raw_len, dpi_parsed_packet_t *ou
     const uint8_t *ptr = raw;
     const uint8_t *end = raw + raw_len;
 
+    /* Ethernet-заголовок (14 байт): dst_mac(6) + src_mac(6) + ethertype(2) */
     out->eth = (const dpi_eth_header_t *)ptr;
     uint16_t ethertype = ntohs(out->eth->ethertype);
     ptr += ETH_HDR_LEN;
 
+    /* 802.1Q VLAN: 4 дополнительных байта (TPID=0x8100, TCI, ethertype) */
     if (ethertype == 0x8100) {
         if (ptr + 4 > end) return -1;
         ethertype = read_u16_be(ptr + 2);
         ptr += 4;
     }
 
+    /* Поддерживаем только IPv4 (ethertype 0x0800) */
     if (ethertype != 0x0800) return -1;
 
+    /* IPv4-заголовок. Минимум 20 байт, IHL может указывать до 60. */
     if (ptr + 20 > end) return -1;
     out->ip = (const dpi_ip_header_t *)ptr;
 
     uint8_t ihl = (out->ip->version_ihl & 0x0F) * 4;
     if (ihl < 20 || ptr + ihl > end) return -1;
 
+    /* ip_total — полная длина IP-дейтаграммы (может отличаться от raw_len
+     * при Ethernet padding). Ограничиваем сверху границей буфера. */
     uint16_t ip_total = ntohs(out->ip->total_length);
     const uint8_t *ip_end = ptr + ip_total;
     if (ip_end > end) ip_end = end;
@@ -56,6 +77,9 @@ int dpi_parse_packet(const uint8_t *raw, size_t raw_len, dpi_parsed_packet_t *ou
     if (proto == IP_PROTO_TCP) {
         if (ptr + 20 > ip_end) return -1;
         out->tcp = (const dpi_tcp_header_t *)ptr;
+
+        /* Data offset — длина TCP-заголовка в 32-битных словах.
+         * Поле data_offset_flags: старшие 4 бита — data offset. */
         uint16_t tcp_hdr_len = ((ntohs(out->tcp->data_offset_flags) >> 12) & 0xF) * 4;
         if (tcp_hdr_len < 20) return -1;
         ptr += tcp_hdr_len;
@@ -66,6 +90,7 @@ int dpi_parse_packet(const uint8_t *raw, size_t raw_len, dpi_parsed_packet_t *ou
         out->payload = ptr;
         out->payload_len = (size_t)(ip_end - ptr);
     } else if (proto == IP_PROTO_UDP) {
+        /* UDP-заголовок фиксированного размера — 8 байт */
         if (ptr + 8 > ip_end) return -1;
         out->udp = (const dpi_udp_header_t *)ptr;
         ptr += 8;
@@ -75,6 +100,7 @@ int dpi_parse_packet(const uint8_t *raw, size_t raw_len, dpi_parsed_packet_t *ou
         out->payload = ptr;
         out->payload_len = (size_t)(ip_end - ptr);
     } else if (proto == IP_PROTO_ICMP) {
+        /* ICMP не имеет портов — используем 0 для обоих */
         out->tuple.src_port = 0;
         out->tuple.dst_port = 0;
         out->payload = ptr;

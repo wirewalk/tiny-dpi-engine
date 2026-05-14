@@ -1,3 +1,14 @@
+/*
+ * Точка входа CLI.
+ *
+ * Инициализация пайплайна:
+ *   1. Загрузка базы сигнатур из файла
+ *   2. Построение автомата Ахо-Корасик
+ *   3. Инициализация таблицы потоков и статистики
+ *   4. Запуск захвата (live или из pcap-файла)
+ *   5. Вывод результатов
+ */
+
 #include "dpi.h"
 
 #include <stdio.h>
@@ -13,14 +24,14 @@ static void usage(const char *prog) {
         "Usage: %s [options]\n"
         "\n"
         "Options:\n"
-        "  -i, --iface IFACE    Network interface to capture on (default: auto)\n"
-        "  -r, --read FILE      Read packets from pcap file\n"
-        "  -s, --sigs FILE      Signature database file (default: signatures/default.sig)\n"
-        "  -f, --filter FILTER  BPF filter expression\n"
-        "  -n, --count N        Capture N packets then stop (0 = unlimited)\n"
-        "  -t, --timeout SEC    Capture timeout in seconds\n"
-        "  -v, --verbose        Verbose output\n"
-        "  -h, --help           Show this help\n"
+        "  -i, --iface IFACE    Сетевой интерфейс для захвата (по умолчанию: авто)\n"
+        "  -r, --read FILE      Читать пакеты из pcap-файла\n"
+        "  -s, --sigs FILE      Файл базы сигнатур (по умолчанию: signatures/default.sig)\n"
+        "  -f, --filter FILTER  BPF-фильтр (напр. 'port 53')\n"
+        "  -n, --count N        Захватить N пакетов и остановиться (0 = бесконечно)\n"
+        "  -t, --timeout SEC    Таймаут захвата в секундах\n"
+        "  -v, --verbose        Подробный вывод\n"
+        "  -h, --help           Показать справку\n"
         "\n"
         "Examples:\n"
         "  %s -i eth0 -n 1000\n"
@@ -65,8 +76,9 @@ int main(int argc, char **argv) {
     }
 
     fprintf(stderr, "tiny-dpi-engine\n");
-    fprintf(stderr, "Loading signatures from: %s\n", sig_file);
 
+    /* Шаг 1: загрузка сигнатур */
+    fprintf(stderr, "Loading signatures from: %s\n", sig_file);
     if (dpi_sig_db_load(&g_db, sig_file) != 0) {
         fprintf(stderr, "Warning: no signatures loaded. Classification by port only.\n");
         memset(&g_db, 0, sizeof(g_db));
@@ -76,6 +88,7 @@ int main(int argc, char **argv) {
 
     g_sig_db = &g_db;
 
+    /* Шаг 2: построение автомата Ахо-Корасик */
     dpi_ac_t ac = {0};
     if (g_db.count > 0) {
         if (dpi_ac_build(&ac, &g_db) != 0) {
@@ -86,12 +99,14 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Aho-Corasick: %d nodes\n", ac.node_count);
     }
 
+    /* Шаг 3: инициализация таблицы потоков и статистики */
     dpi_flow_table_t ft;
     dpi_flow_table_init(&ft);
 
     dpi_stats_t stats;
     dpi_stats_init(&stats);
 
+    /* Шаг 4: запуск захвата */
     int ret;
     if (pcap_file) {
         ret = dpi_capture_file(pcap_file, &ac, &ft, &stats, max_packets);
@@ -100,6 +115,7 @@ int main(int argc, char **argv) {
                               max_packets, timeout_sec);
     }
 
+    /* Шаг 5: вывод результатов */
     if (ret == 0) {
         dpi_stats_print(&stats, &ft);
         if (ft.count > 0) {

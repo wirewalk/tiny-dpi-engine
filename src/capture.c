@@ -1,3 +1,17 @@
+/*
+ * Захват сетевого трафика через libpcap.
+ *
+ * Поддерживает два режима:
+ *   - Живой захват с сетевого интерфейса (dpi_capture_run)
+ *   - Чтение из pcap-файла (dpi_capture_file)
+ *
+ * Каждый захваченный пакет передаётся в пайплайн:
+ *   parse → classify → update flow table + stats
+ *
+ * Корректная остановка: по сигналу SIGINT/SIGTERM
+ * или по достижении лимита пакетов.
+ */
+
 #include "dpi.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +28,8 @@ static void signal_handler(int sig) {
     g_running = 0;
 }
 
+/* Callback для каждого захваченного пакета.
+ * user — массив из 3 указателей: {ac, flow_table, stats}. */
 static void dpi_pcap_callback(unsigned char *user, const struct pcap_pkthdr *h,
                               const unsigned char *bytes) {
     if (!g_running) return;
@@ -36,6 +52,7 @@ int dpi_capture_run(const char *iface, const char *bpf_filter,
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t *handle = NULL;
 
+    /* Если интерфейс не указан — выбираем первый доступный */
     if (iface) {
         handle = pcap_open_live(iface, 65535, 1, 1000, errbuf);
     } else {
@@ -55,6 +72,7 @@ int dpi_capture_run(const char *iface, const char *bpf_filter,
         return -1;
     }
 
+    /* BPF-фильтр: если задан — компилируем и устанавливаем */
     if (bpf_filter) {
         struct bpf_program fp;
         if (pcap_compile(handle, &fp, bpf_filter, 0, PCAP_NETMASK_UNKNOWN) != 0) {
@@ -75,6 +93,7 @@ int dpi_capture_run(const char *iface, const char *bpf_filter,
         pcap_set_timeout(handle, timeout_sec * 1000);
     }
 
+    /* Обработка сигналов для graceful shutdown */
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = signal_handler;
@@ -87,8 +106,10 @@ int dpi_capture_run(const char *iface, const char *bpf_filter,
             iface ? iface : "any", max_packets);
 
     if (max_packets > 0) {
+        /* Ограниченное число пакетов — pcap_loop вернёт сам */
         pcap_loop(handle, max_packets, dpi_pcap_callback, (unsigned char *)ctx);
     } else {
+        /* Бесконечный захват — останавливается по Ctrl+C или timeout */
         while (g_running) {
             int ret = pcap_dispatch(handle, 64, dpi_pcap_callback, (unsigned char *)ctx);
             if (ret == -1) {
@@ -103,6 +124,8 @@ int dpi_capture_run(const char *iface, const char *bpf_filter,
     return 0;
 }
 
+/* Чтение пакетов из pcap-файла.
+ * Аналогично живому захвату, но из сохранённого дампа. */
 int dpi_capture_file(const char *path, dpi_ac_t *ac, dpi_flow_table_t *ft,
                      dpi_stats_t *stats, int max_packets) {
     char errbuf[PCAP_ERRBUF_SIZE];
