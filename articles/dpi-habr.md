@@ -4,7 +4,7 @@
 который можно было бы собрать за вечер и понять от начала до конца - и пришлось написать свой, на C. Эта статья - рассказ о том,
 как работает Deep Packet Inspection.
 
-Код проекта: [gitflic.ru/wirewalk/tiny-dpi-engine](https://gitflic.ru/wirewalk/tiny-dpi-engine)
+Код проекта: [gitflic.ru/wirewalk/tiny-dpi-engine](https://gitflic.ru/project/wirewalk/tiny-dpi-engine)
 
 *Эпиграфы к разделам - цитаты из мультика "Шрек".* (Не то чтобы я был фанат, но история уж очень подходящая.)
 (Эй, если у вас есть идея что использовать в качестве источника цитат для следующей статьи - я открыт к предложениям!)
@@ -720,7 +720,7 @@ SIP: SIP/2.0
 > *- И что теперь?*
 > *- А вот это уже совсем другая история.*
 
-Проект открыт: [gitflic.ru/wirewalk/tiny-dpi-engine](https://gitflic.ru/wirewalk/tiny-dpi-engine).
+Проект открыт: [gitflic.ru/wirewalk/tiny-dpi-engine](https://gitflic.ru/project/wirewalk/tiny-dpi-engine).
 Зеркало: [github.com/wirewalk/tiny-dpi-engine](https://github.com/wirewalk/tiny-dpi-engine).
 Pull request'ы приветствуются.
 

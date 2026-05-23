@@ -4,7 +4,7 @@
 
 Захватывает сетевой трафик, разбирает пакеты, классифицирует протоколы с помощью сигнатур (алгоритм Ахо-Корасик) и портовых эвристик, отслеживает сетевые потоки в реальном времени.
 
-**Репозиторий:** [gitflic.ru/wirewalk/tiny-dpi-engine](https://gitflic.ru/wirewalk/tiny-dpi-engine) | Зеркало: [github.com/wirewalk/tiny-dpi-engine](https://github.com/wirewalk/tiny-dpi-engine)
+**Репозиторий:** [gitflic.ru/project/wirewalk/tiny-dpi-engine](https://gitflic.ru/project/wirewalk/tiny-dpi-engine) | Зеркало: [github.com/wirewalk/tiny-dpi-engine](https://github.com/wirewalk/tiny-dpi-engine)
 
 ## Архитектура
 
